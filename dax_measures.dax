@@ -1,0 +1,173 @@
+-- ═══════════════════════════════════════════════════════════════
+-- DAX MEASURES — Olist E-Commerce Customer Retention Dashboard
+-- ═══════════════════════════════════════════════════════════════
+
+-- ─── PAGE 1: EXECUTIVE OVERVIEW ──────────────────────────────
+-- Сторінка з ключовими KPI та трендами для керівництва.
+-- Візуали: 6 карток, лінійний графік, стовпчикова діаграма,
+-- горизонтальна лінійчаста (топ-10 категорій), слайсери (рік, квартал).
+
+-- Загальний дохід: сума revenue (ціна товару + вартість доставки) по всіх замовленнях.
+-- Використовується: KPI-картка, лінійний графік тренду, топ-10 категорій.
+Total Revenue = SUM(fact_orders[revenue])
+
+-- Загальна кількість замовлень у датасеті.
+-- Використовується: KPI-картка, стовпчикова діаграма по днях тижня.
+Total Orders = COUNTROWS(fact_orders)
+
+-- Average Order Value — середня вартість одного замовлення.
+-- Формула: загальний дохід / кількість замовлень.
+-- DIVIDE захищає від ділення на 0 (повертає 0 замість помилки).
+AOV = DIVIDE([Total Revenue], [Total Orders], 0)
+
+-- Кількість унікальних клієнтів (без дублів).
+-- Один клієнт може мати кілька замовлень, тому DISTINCTCOUNT.
+Unique Customers = DISTINCTCOUNT(fact_orders[customer_unique_id])
+
+-- Середня оцінка відгуку клієнтів (шкала 1-5).
+-- Показує загальний рівень задоволеності клієнтів.
+Avg Review Score = AVERAGE(fact_orders[review_score])
+
+-- Середній час доставки у днях.
+-- Розраховується як різниця між датою доставки та датою замовлення.
+Avg Delivery Days = AVERAGE(fact_orders[delivery_days])
+
+-- Відсоток замовлень, доставлених вчасно (до або в очікувану дату).
+-- on_time = 1 означає вчасну доставку, 0 — затримку.
+On-Time Delivery % = DIVIDE(CALCULATE(COUNTROWS(fact_orders), fact_orders[on_time] = 1), COUNTROWS(fact_orders), 0) * 100
+
+-- Зміна доходу порівняно з попереднім місяцем (Month-over-Month %).
+-- Позитивне значення = зростання, негативне = падіння.
+-- Потребує зв'язку fact_orders[order_date] → dim_date[date].
+Revenue MoM % = VAR CurrentMonth = [Total Revenue] VAR PrevMonth = CALCULATE([Total Revenue], DATEADD(dim_date[date], -1, MONTH)) RETURN DIVIDE(CurrentMonth - PrevMonth, PrevMonth, 0) * 100
+
+-- Зміна кількості замовлень порівняно з попереднім місяцем.
+Orders MoM % = VAR CurrentMonth = [Total Orders] VAR PrevMonth = CALCULATE([Total Orders], DATEADD(dim_date[date], -1, MONTH)) RETURN DIVIDE(CurrentMonth - PrevMonth, PrevMonth, 0) * 100
+
+-- Ковзна середня доходу за останні 3 місяці.
+-- Згладжує сезонні коливання і показує загальний тренд.
+-- Використовується як пунктирна лінія поверх Revenue trend.
+Revenue 3M Rolling Avg = AVERAGEX(DATESINPERIOD(dim_date[date], MAX(dim_date[date]), -3, MONTH), CALCULATE([Total Revenue]))
+
+
+-- ─── PAGE 2: COHORT & RETENTION ──────────────────────────────
+-- Сторінка аналізу когорт — як клієнти повертаються з часом.
+-- Візуали: 3 картки, когортна теплокарта (матриця з умовним форматуванням),
+-- крива утримання (лінійний графік), нові vs повторні (area chart).
+-- Працює з таблицями fact_orders та cohort_data.
+
+
+-- Кількість клієнтів у когорті на початку (period 0).
+-- Використовується для розрахунку Retention Rate.
+Cohort Size = SUM(cohort_data[cohort_size])
+
+-- Кількість клієнтів, що повернулись у певному періоді.
+Retained Customers = SUM(cohort_data[customers])
+
+-- Відсоток утримання: скільки % клієнтів з когорти повернулись.
+-- Формула: кількість повернених / розмір когорти * 100.
+-- Використовується в матриці (рядки: cohort_month, стовпці: period_number).
+-- Умовне форматування кольору фону:
+--   < 0.15 → червоний (#EF5350)
+--   0.15–0.30 → оранжевий (#FFA726)
+--   0.30–0.50 → зелений (#66BB6A)
+--   ≥ 0.50 → темно-зелений (#2E7D32)
+Retention Rate = DIVIDE([Retained Customers], [Cohort Size], 0) * 100
+
+-- Кількість нових клієнтів — тих, хто зробив першу покупку в поточному періоді.
+-- Клієнт вважається "новим", якщо дата замовлення = дата його першої покупки.
+-- Використовується в area chart "New vs Returning Customers".
+New Customers = CALCULATE(DISTINCTCOUNT(fact_orders[customer_unique_id]), FILTER(fact_orders, fact_orders[order_date] = CALCULATE(MIN(fact_orders[order_date]), ALLEXCEPT(fact_orders, fact_orders[customer_unique_id]))))
+
+-- Кількість повторних клієнтів = усі мінус нові.
+-- Використовується в area chart "New vs Returning Customers".
+Returning Customers = [Unique Customers] - [New Customers]
+
+-- Частка нових клієнтів серед усіх (у відсотках).
+-- У Olist ~97–100% — типово для маркетплейсів.
+-- Використовується: KPI-картка.
+New Customer % = DIVIDE([New Customers], [Unique Customers], 0) * 100
+
+-- Кількість клієнтів, що купували більше одного разу.
+Repeat Customers = CALCULATE(DISTINCTCOUNT(fact_orders[customer_unique_id]), FILTER(SUMMARIZE(fact_orders, fact_orders[customer_unique_id], "OrderCount", COUNTROWS(fact_orders)), [OrderCount] > 1))
+
+-- Частка повторних покупок серед усіх клієнтів (у відсотках).
+-- У Olist ~3% — дуже низький показник, ключовий інсайт дашборду.
+-- Використовується: KPI-картка.
+Repeat Purchase Rate = DIVIDE([Repeat Customers], [Unique Customers], 0) * 100
+
+-- Кількість клієнтів, що не купували більше 90 днів (відтік).
+-- 90 днів — стандартний поріг для e-commerce.
+Churned Customers = VAR MaxDate = MAX(fact_orders[order_date]) RETURN CALCULATE(DISTINCTCOUNT(fact_orders[customer_unique_id]), FILTER(ALL(fact_orders), DATEDIFF(CALCULATE(MAX(fact_orders[order_date]), ALLEXCEPT(fact_orders, fact_orders[customer_unique_id])), MaxDate, DAY) > 90))
+
+-- Рівень відтоку: відсоток клієнтів, що перестали купувати.
+-- Використовується: KPI-картка.
+Churn Rate = DIVIDE([Churned Customers], [Unique Customers], 0) * 100
+
+
+-- ─── PAGE 3: RFM SEGMENTATION ───────────────────────────────
+-- Сторінка сегментації клієнтів за моделлю RFM:
+--   R (Recency) — скільки днів тому була остання покупка
+--   F (Frequency) — скільки разів купував
+--   M (Monetary) — скільки витратив загалом
+-- Сегменти розраховані в Python ETL: Champions, Loyal, New Customers,
+-- Promising, At Risk, Lost.
+-- Візуали: кільцева діаграма, точкова діаграма (scatter),
+-- зведена таблиця, горизонтальна лінійчаста.
+
+
+-- Кількість клієнтів у вибраному сегменті.
+-- Використовується: кільцева діаграма, таблиця.
+Segment Count = COUNTROWS(rfm_data)
+
+-- Частка доходу сегменту від загального доходу (%).
+-- ALL(rfm_data[segment]) ігнорує фільтр по сегменту для знаменника,
+-- щоб завжди ділити на загальну суму.
+-- Використовується: таблиця Segment Summary.
+Segment Revenue Share = DIVIDE(SUM(rfm_data[monetary]), CALCULATE(SUM(rfm_data[monetary]), ALL(rfm_data[segment])), 0) * 100
+
+-- Середня кількість днів з останньої покупки для сегменту.
+-- Менше = краще (клієнт купував нещодавно).
+-- Використовується: таблиця, вісь X точкової діаграми.
+Avg Recency = AVERAGE(rfm_data[recency])
+
+-- Середня кількість покупок клієнта в сегменті.
+-- Більше = лояльніший клієнт.
+-- Використовується: таблиця, розмір точок у scatter.
+Avg Frequency = AVERAGE(rfm_data[frequency])
+
+-- Середня сума витрат клієнта в сегменті (в R$).
+-- Використовується: таблиця, вісь Y точкової діаграми.
+Avg Monetary = AVERAGE(rfm_data[monetary])
+
+
+-- ─── PAGE 4: CUSTOMER JOURNEY ────────────────────────────────
+-- Сторінка воронки покупок та аналізу платежів.
+-- Показує drop-off між 1-ю, 2-ю та 3-ю покупками.
+-- Візуали: воронка (Funnel), кільцева діаграма (Payment Type),
+-- стовпчикова (Installments), стовпчикова (Review Score).
+--
+-- Для воронки створена допоміжна таблиця Funnel_Steps:
+--   Step           | Sort_Order
+--   All Customers  | 1
+--   2nd Purchase   | 2
+--   3rd Purchase   | 3
+-- Створюється через: Головна → Введення даних.
+-- Поле Step сортується за Sort_Order (клікни Step → Сортувати за стовпцем → Sort_Order).
+
+
+-- Загальна кількість унікальних клієнтів (= верх воронки).
+-- У Olist всі клієнти зробили хоча б 1 покупку.
+Funnel - All Customers = DISTINCTCOUNT(fact_orders[customer_unique_id])
+
+-- Клієнти, що зробили 2+ покупки.
+-- Різкий drop-off (~97%) — ключовий інсайт дашборду.
+Funnel - 2nd Purchase = CALCULATE(DISTINCTCOUNT(fact_orders[customer_unique_id]), FILTER(SUMMARIZE(fact_orders, fact_orders[customer_unique_id], "OrderCount", COUNTROWS(fact_orders)), [OrderCount] >= 2))
+
+-- Клієнти, що зробили 3+ покупки.
+Funnel - 3rd Purchase = CALCULATE(DISTINCTCOUNT(fact_orders[customer_unique_id]), FILTER(SUMMARIZE(fact_orders, fact_orders[customer_unique_id], "OrderCount", COUNTROWS(fact_orders)), [OrderCount] >= 3))
+
+-- Міра для візуалу воронки: підставляє потрібне значення
+-- залежно від обраного кроку з таблиці Funnel_Steps.
+-- SWITCH перевіряє яке значення вибране і повертає відповідну міру.
+Funnel Value = SWITCH(SELECTEDVALUE(Funnel_Steps[Step]), "All Customers", [Funnel - All Customers], "2nd Purchase", [Funnel - 2nd Purchase], "3rd Purchase", [Funnel - 3rd Purchase], 0)
